@@ -1,0 +1,76 @@
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: descpliega servidor para curso aws
+Mappings:
+  RegionMap:
+    us-east-1:
+      UbuntuAmi: "ami-0ac019f4fcb7cb7e6" #Ubuntu 18.04
+      RegionAlias: "Virginia"
+
+Resources:
+    Ec2InstanceAirflow:
+        Type: AWS::EC2::Instance
+        DeletionPolicy: Delete
+        Properties:
+            InstanceInitiatedShutdownBehavior: terminate
+            SubnetId: subnet-621bf929
+            InstanceType: "t2.micro"
+            ImageId: !FindInMap [ RegionMap, !Ref "AWS::Region" , UbuntuAmi ]
+            SecurityGroupIds:
+                - "sg-607e5b2b"
+            KeyName: "Key-PRODUCTION-BigData"
+            Tags:
+            - Key: Name
+              Value: !Sub "Airflow-${EnvironmentName}"
+            UserData:
+                Fn::Base64: !Sub |
+                    #!/bin/bash
+                    echo " ####################  apt install"
+                    apt-get update -y
+                    apt install awscli -y
+                    apt install python3-pip -y
+                    echo " ####################  Set USER_HOME"
+                    USER_HOME=/home/ubuntu
+                    echo " ####################  Clone pyenv git"
+                    git clone https://github.com/pyenv/pyenv.git $USER_HOME/.pyenv
+                    echo " ####################  set PYENV_ROOT"
+                    export PYENV_ROOT="$USER_HOME/.pyenv"
+                    echo "export PYENV_ROOT=$USER_HOME/.pyenv" >> $USER_HOME/.bashrc
+                    echo " ####################  set PYENV bin"
+                    export PATH="$PYENV_ROOT/bin:$PATH"
+                    echo 'export PATH="$PYENV_ROOT/bin:$PATH"' >> $USER_HOME/.bashrc
+                    echo " ####################  PYENV init"
+                    eval "$(pyenv init -)"
+                    echo -e 'if command -v pyenv 1>/dev/null 2>&1; then\n  eval "$(pyenv init -)"\nfi' >> $USER_HOME/.bashrc
+                    # Install python build dependencies (must be run as root)
+                    echo " ####################  INSTALL PACKAGES"
+                    apt-get install -y make build-essential libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev wget curl llvm libncurses5-dev xz-utils tk-dev libxml2-dev libxmlsec1-dev libffi-dev liblzma-dev
+                    # Install python 3.6.5
+                    echo " ####################  INSTALL PYTHON"
+                    pyenv install 3.6.5
+                    pyenv global 3.6.5
+                    pip install -U pip
+                    pip install pipenv
+                    sudo chown -R ubuntu:ubuntu $USER_HOME/.pyenv
+                    echo " ####################  download Pampa"
+                    mkdir $USER_HOME/airflow
+                    cd $USER_HOME/airflow
+                    aws s3 cp --recursive s3://preprod.mach-big-data-pampa/ $(pwd)
+                    echo " ####################  Run setup script"
+                    source scripts/variables.sh
+                    echo 'source $USER_HOME/airflow/scripts/variables.sh' >> $USER_HOME/.bashrc
+                    sh scripts/persistent_setup.sh
+                    # Necessary for newer versions of airflow
+                    export SLUGIFY_USES_TEXT_UNIDECODE=yes
+                    echo " ####################  PIPENV INSTALL"
+                    export PIPENV_VENV_IN_PROJECT=True
+                    echo " ####################  REGISTER EC2 in ALB"
+                    instance_id=$(curl http://169.254.169.254/latest/meta-data/instance-id)
+                    arn_target=$(aws elbv2 describe-target-groups --region us-east-1 |grep stg-airflow-target |grep arn | cut -c32-130)
+                    aws elbv2 register-targets --target-group-arn $arn_target --region us-east-1 --targets Id=$instance_id,Port=8080
+                    pipenv install --python 3.6.5
+                    echo " ####################  Start Airflow"
+                    pipenv run airflow initdb
+                    pipenv run airflow scheduler -D
+                    pipenv run airflow webserver
+                    sudo chown -R ubuntu:ubuntu $USER_HOME
